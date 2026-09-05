@@ -366,12 +366,13 @@ class PhishingCampaign:
         emails = []
         for target in target_list:
             tracking_url = self.pixel.get_pixel_url(target.get("id", str(uuid.uuid4())[:8]))
+            tgt = dict(target)
+            tgt.setdefault("name", "User")
             email_content = self.template_gen.generate(
                 template_type=template_type,
-                name=target.get("name", "User"),
                 company=target_company,
                 url=f"{self.server_url}/page/{page_path}",
-                **target
+                **tgt
             )
             emails.append({
                 "to": target.get("email"),
