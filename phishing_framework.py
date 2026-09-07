@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
 """
-SE1 — Phishing Framework
-Email template generation, credential capture server, landing page builder, tracking pixels
+SE1 — Phishing Framework (lab-sealed)
+Email template generation, local-only capture simulation, landing page builder.
+
+ANTI-ABUSE: this is a LOCAL simulation kit. Every generator requires a lab-root
+context; real domains are refused; all output is watermarked
+"SIMULATION / AUTHORIZED TRAINING ONLY"; dry-run by default.
 """
 
+import argparse
 import http.server
 import socketserver
 import smtplib
@@ -12,18 +17,60 @@ import email.mime.multipart
 import email.mime.image
 import json
 import os
+import sys
 import uuid
 import base64
 from datetime import datetime
+from pathlib import Path
 from typing import Dict, List, Optional
 import threading
 import urllib.parse
+
+WATERMARK = "SIMULATION / AUTHORIZED TRAINING ONLY"
+ALLOWED_TLDS = (".example", ".internal", ".test", ".invalid")
+
+
+class LabGuardError(Exception):
+    """Raised when a safety constraint is violated."""
+
+
+class LabGuard:
+    """Requires an explicit lab-root and OWN target before any operation."""
+
+    def __init__(self, lab_root=None, target_org="OWN", dry_run=True):
+        if not lab_root:
+            raise LabGuardError("Explicit --lab-root is required for every module.")
+        if target_org != "OWN":
+            raise LabGuardError("Only --target-org OWN is permitted in lab mode.")
+        self.lab_root = Path(lab_root)
+        self.lab_root.mkdir(parents=True, exist_ok=True)
+        self.dry_run = dry_run
+
+    def require_armed(self):
+        if self.dry_run:
+            raise LabGuardError(
+                "Dry-run is the default. Local artifact writing requires "
+                "--armed in addition to --lab-root."
+            )
+
+    def armed_is_enabled(self):
+        return not self.dry_run
+
+    def validate_domain(self, domain):
+        if not domain.lower().endswith(ALLOWED_TLDS):
+            raise LabGuardError(
+                f"Refusing domain '{domain}': only {ALLOWED_TLDS} are allowed in lab mode."
+            )
+
+    def watermark(self, text):
+        return f"[{WATERMARK}]\n{text}"
 
 
 class EmailTemplate:
     """Generate phishing email templates"""
     
-    def __init__(self):
+    def __init__(self, lab_root=None, target_org="OWN", dry_run=True):
+        self.guard = LabGuard(lab_root, target_org, dry_run)
         self.templates = {
             "password_reset": {
                 "subject": "Password Reset Request",
@@ -84,8 +131,8 @@ Best regards,
         )
         
         return {
-            "subject": template["subject"],
-            "body": body
+            "subject": self.guard.watermark(template["subject"]),
+            "body": self.guard.watermark(body)
         }
     
     def list_templates(self) -> List[str]:
@@ -148,12 +195,14 @@ class CredentialCapture:
         self.form_fields = ["username", "password", "email"]
     
     def store_credentials(self, data: Dict):
-        """Store captured credentials"""
+        """Store SIMULATION credentials only (never real personal data)"""
         entry = {
             "id": str(uuid.uuid4())[:8],
             "timestamp": datetime.now().isoformat(),
             "data": data,
-            "ip_address": data.get("ip_address", "unknown")
+            "ip_address": "127.0.0.1",
+            "watermark": WATERMARK,
+            "simulated": True
         }
         self.captured.append(entry)
         return entry["id"]
@@ -176,9 +225,10 @@ class CredentialCapture:
 
 
 class LandingPageBuilder:
-    """Build phishing landing pages"""
-    
-    def __init__(self):
+    """Build watermarked, training-only landing pages"""
+
+    def __init__(self, lab_root=None, target_org="OWN", dry_run=True):
+        self.guard = LabGuard(lab_root, target_org, dry_run)
         self.base_template = """<!DOCTYPE html>
 <html>
 <head>
@@ -234,14 +284,15 @@ class LandingPageBuilder:
     def build_page(self, company: str, title: str, fields: List[str],
                    action: str, button_text: str = "Submit",
                    tracking_url: Optional[str] = None) -> str:
-        """Build complete landing page"""
+        """Build complete landing page (watermarked, training-only)"""
+        self.guard.validate_domain(urllib.parse.urlparse(action).netloc)
         form_fields = self.build_form(fields)
-        
+
         tracking_pixel = ""
         if tracking_url:
             tracking_pixel = f'<img src="{tracking_url}" width="1" height="1" style="display:none;">'
-        
-        return self.base_template.format(
+
+        html = self.base_template.format(
             company=company,
             title=title,
             action=action,
@@ -249,11 +300,14 @@ class LandingPageBuilder:
             button_text=button_text,
             tracking_pixel=tracking_pixel
         )
-    
+        banner = f'<div style="background:#ffe0e0;padding:8px;border:2px solid red;font-weight:bold;">{WATERMARK}</div>'
+        return html.replace("<body>", f"<body>\n{banner}", 1)
+
     def save_page(self, html: str, filepath: str):
-        """Save landing page to file"""
-        with open(filepath, "w") as f:
-            f.write(html)
+        """Save landing page to file under lab root"""
+        self.guard.require_armed()
+        target = self.guard.lab_root / Path(filepath).name
+        target.write_text(html)
 
 
 class PhishingServer(http.server.BaseHTTPRequestHandler):
@@ -325,14 +379,15 @@ class PhishingServer(http.server.BaseHTTPRequestHandler):
 
 
 class PhishingCampaign:
-    """Main campaign orchestrator"""
-    
-    def __init__(self, server_url: str):
+    """Main campaign orchestrator (LAB-SEALED: requires --lab-root, dry-run default)"""
+
+    def __init__(self, server_url: str, lab_root=None, target_org="OWN", dry_run=True):
+        self.guard = LabGuard(lab_root, target_org, dry_run)
         self.server_url = server_url
-        self.template_gen = EmailTemplate()
+        self.template_gen = EmailTemplate(lab_root, target_org, dry_run)
         self.pixel = TrackingPixel(server_url)
         self.capturer = CredentialCapture()
-        self.landing_builder = LandingPageBuilder()
+        self.landing_builder = LandingPageBuilder(lab_root, target_org, dry_run)
         self.campaign_id = str(uuid.uuid4())[:8]
     
     def create_campaign(self, name: str, template_type: str, target_company: str,
@@ -357,9 +412,10 @@ class PhishingCampaign:
             tracking_url=f"{self.server_url}/track/{self.pixel.pixel_id}/campaign"
         )
         
-        # Save landing page
+        # Save landing page (only when armed)
         page_path = f"landing_{self.campaign_id}.html"
-        self.landing_builder.save_page(page, page_path)
+        if not self.guard.dry_run and self.guard.armed_is_enabled():
+            self.landing_builder.save_page(page, page_path)
         campaign["landing_page"] = page_path
         
         # Generate emails for each target
@@ -403,35 +459,49 @@ class PhishingCampaign:
         }
 
 
-if __name__ == "__main__":
-    print("SE1 — Phishing Framework")
+def main(argv=None):
+    argv = argv if argv is not None else sys.argv[1:]
+    p = argparse.ArgumentParser(
+        description="SE1 Phishing Framework (lab-sealed simulation kit).")
+    p.add_argument("--lab-root", required=True)
+    p.add_argument("--target-org", default="OWN")
+    p.add_argument("--armed", action="store_true")
+    args = p.parse_args(argv)
+
+    guard = LabGuard(args.lab_root, args.target_org, dry_run=not args.armed)
+    print(f"SE1 — Phishing Framework [{WATERMARK}]")
     print("=" * 40)
-    
-    # Example usage
-    framework = PhishingCampaign("http://localhost:8080")
-    
-    # List available templates
+
+    framework = PhishingCampaign(
+        "https://sim.example/p",
+        lab_root=args.lab_root,
+        target_org=args.target_org,
+        dry_run=not args.armed,
+    )
+
     print("\nAvailable email templates:")
     for template in framework.template_gen.list_templates():
         print(f"  - {template}")
-    
-    # Create sample campaign
+
     targets = [
-        {"name": "John Doe", "email": "john@example.com", "id": "001"},
-        {"name": "Jane Smith", "email": "jane@example.com", "id": "002"}
+        {"name": "Jane Analytics", "email": "jane@example.com", "id": "s-001"},
+        {"name": "Roald Sandbox", "email": "roald@example.com", "id": "s-002"},
     ]
-    
+
     campaign = framework.create_campaign(
-        name="Test Campaign",
+        name="Lab Drill",
         template_type="password_reset",
         target_company="Example Corp",
         target_list=targets,
-        form_fields=["username", "password"]
+        form_fields=["username", "password"],
     )
-    
-    print(f"\nCampaign created: {campaign['id']}")
-    print(f"Landing page: {campaign['landing_page']}")
-    print(f"Emails prepared: {len(campaign['emails'])}")
-    
-    print("\nTo start the server:")
-    print("  python3 phishing_framework.py --server")
+
+    print(f"\nCampaign created (dry-run=not armed): {campaign['id']}")
+    print(f"Landing page: landing_{campaign['id']}.html")
+    print(f"Emails prepared (synthetic, watermarked): {len(campaign['emails'])}")
+    print("\nTo write local artifacts: python3 phishing_framework.py --lab-root ./lab --armed")
+
+if __name__ == "__main__":
+    sys.exit(main())
+
+
