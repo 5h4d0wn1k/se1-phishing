@@ -19,8 +19,11 @@ refused outright.
 
 ## IMPORTANT: Read before use.
 
+**This is a DEFENSIVE / EDUCATIONAL tool with hard consent gating.**
 This project is provided for **educational and authorized security testing
-purposes only**.
+purposes only**. Running this tool against any target without explicit,
+written, pre-approved consent from that target's organization is strictly
+prohibited and may violate applicable law.
 
 ### Authorization Requirements
 - You MUST have explicit written permission from the owning organization before
